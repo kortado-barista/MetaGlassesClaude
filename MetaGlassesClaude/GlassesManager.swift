@@ -3,6 +3,7 @@
 
 import Foundation
 import UIKit
+import AVFoundation
 import Combine
 import MWDATCore
 import MWDATCamera
@@ -11,14 +12,34 @@ import MWDATCamera
 final class GlassesManager: ObservableObject {
 
     @Published var connectionState: DATConnectionState = .disconnected
-    @Published var latestFrame: UIImage?
     @Published var isConnected = false
+    @Published var hasVideoContent = false
     @Published var registrationState: RegistrationState = .unavailable
     @Published var errorMessage: String?
+
+    /// AVSampleBufferDisplayLayer handles native HEVC decoding and display.
+    let displayLayer: AVSampleBufferDisplayLayer = {
+        let layer = AVSampleBufferDisplayLayer()
+        layer.videoGravity = .resizeAspect
+        // Tie the layer to the host clock so retimed frames display immediately
+        var timebase: CMTimebase?
+        CMTimebaseCreateWithSourceClock(
+            allocator: kCFAllocatorDefault,
+            sourceClock: CMClockGetHostTimeClock(),
+            timebaseOut: &timebase
+        )
+        if let timebase {
+            CMTimebaseSetTime(timebase, time: CMClockGetTime(CMClockGetHostTimeClock()))
+            CMTimebaseSetRate(timebase, rate: 1.0)
+            layer.controlTimebase = timebase
+        }
+        return layer
+    }()
 
     private var wearables: any WearablesInterface { MWDATCore.Wearables.shared }
     private var streamSession: StreamSession?
     private var listenerTokens: [any AnyListenerToken] = []
+    private var isCameraStarting = false
 
     // MARK: - Setup
 
@@ -94,7 +115,7 @@ final class GlassesManager: ObservableObject {
     private func startCameraWithAutoSelector() async {
         print("[DAT] trying AutoDeviceSelector")
         let selector = AutoDeviceSelector(wearables: wearables)
-        let config = StreamSessionConfig(videoCodec: .raw, resolution: .medium, frameRate: 15)
+        let config = StreamSessionConfig(videoCodec: .hvc1, resolution: .medium, frameRate: 15)
         let session = StreamSession(streamSessionConfig: config, deviceSelector: selector)
 
         let stateToken = session.statePublisher.listen { [weak self] (state: StreamSessionState) in
@@ -118,9 +139,26 @@ final class GlassesManager: ObservableObject {
         listenerTokens.append(stateToken)
 
         let frameToken = session.videoFramePublisher.listen { [weak self] (frame: VideoFrame) in
-            guard let image = frame.makeUIImage() else { return }
+            let sampleBuffer = frame.sampleBuffer
+            // Retime to host clock so AVSampleBufferDisplayLayer renders immediately
+            var timing = CMSampleTimingInfo(
+                duration: CMTime(value: 1, timescale: 15),
+                presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
+                decodeTimeStamp: .invalid
+            )
+            var retimed: CMSampleBuffer?
+            guard CMSampleBufferCreateCopyWithNewTiming(
+                allocator: nil,
+                sampleBuffer: sampleBuffer,
+                sampleTimingEntryCount: 1,
+                sampleTimingArray: &timing,
+                sampleBufferOut: &retimed
+            ) == noErr, let retimed else { return }
             Task { @MainActor [weak self] in
-                self?.latestFrame = image
+                guard let self else { return }
+                if self.displayLayer.status == .failed { self.displayLayer.flush() }
+                self.displayLayer.enqueue(retimed)
+                if !self.hasVideoContent { self.hasVideoContent = true }
             }
         }
         listenerTokens.append(frameToken)
@@ -140,6 +178,7 @@ final class GlassesManager: ObservableObject {
     func disconnect() {
         Task { await streamSession?.stop() }
         streamSession = nil
+        isCameraStarting = false
         connectionState = .disconnected
         isConnected = false
     }
@@ -147,6 +186,14 @@ final class GlassesManager: ObservableObject {
     // MARK: - Camera
 
     private func startCamera(for deviceId: DeviceIdentifier) async {
+        guard !isCameraStarting, streamSession == nil else {
+            print("[DAT] startCamera skipped — already starting or active (isCameraStarting=\(isCameraStarting), streamSession=\(streamSession != nil))")
+            return
+        }
+        isCameraStarting = true
+        defer { isCameraStarting = false }
+        print("[DAT] startCamera(for:) BEGIN deviceId=\(deviceId)")
+
         // Check camera permission first, request if not granted
         do {
             var status = try await wearables.checkPermissionStatus(.camera)
@@ -157,6 +204,7 @@ final class GlassesManager: ObservableObject {
                 print("[DAT] camera permission after request: \(status)")
             }
             guard status == .granted else {
+                print("[DAT] camera permission NOT granted, aborting")
                 errorMessage = "Camera permission denied. Please grant camera access in the Meta AI app."
                 return
             }
@@ -166,29 +214,59 @@ final class GlassesManager: ObservableObject {
             return
         }
 
+        print("[DAT] creating StreamSession with SpecificDeviceSelector + .hvc1 codec")
         let selector = SpecificDeviceSelector(device: deviceId)
-        let config = StreamSessionConfig(
-            videoCodec: .raw,
-            resolution: .medium,
-            frameRate: 15
-        )
+        let config = StreamSessionConfig(videoCodec: .hvc1, resolution: .medium, frameRate: 15)
         let session = StreamSession(streamSessionConfig: config, deviceSelector: selector)
 
-        let stateToken = session.statePublisher.listen { (state: StreamSessionState) in
+        let stateToken = session.statePublisher.listen { [weak self] (state: StreamSessionState) in
             print("[DAT] startCamera statePublisher -> \(state)")
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                switch state {
+                case .streaming:
+                    self.connectionState = .connected
+                    self.isConnected = true
+                case .stopped, .stopping:
+                    if self.streamSession === session {
+                        self.connectionState = .disconnected
+                        self.isConnected = false
+                        self.streamSession = nil
+                    }
+                default:
+                    break
+                }
+            }
         }
         listenerTokens.append(stateToken)
 
-        var frameCount = 0
         let frameToken = session.videoFramePublisher.listen { [weak self] (frame: VideoFrame) in
-            frameCount += 1
-            if frameCount <= 3 || frameCount % 30 == 0 {
-                let img = frame.makeUIImage()
-                print("[DAT] videoFramePublisher fired #\(frameCount), makeUIImage=\(img != nil ? "OK" : "nil")")
-            }
-            guard let image = frame.makeUIImage() else { return }
+            let sampleBuffer = frame.sampleBuffer
+            // Retime to host clock so AVSampleBufferDisplayLayer renders immediately
+            var timing = CMSampleTimingInfo(
+                duration: CMTime(value: 1, timescale: 15),
+                presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
+                decodeTimeStamp: .invalid
+            )
+            var retimed: CMSampleBuffer?
+            guard CMSampleBufferCreateCopyWithNewTiming(
+                allocator: nil,
+                sampleBuffer: sampleBuffer,
+                sampleTimingEntryCount: 1,
+                sampleTimingArray: &timing,
+                sampleBufferOut: &retimed
+            ) == noErr, let retimed else { return }
             Task { @MainActor [weak self] in
-                self?.latestFrame = image
+                guard let self else { return }
+                if self.displayLayer.status == .failed {
+                    print("[DAT] displayLayer failed: \(self.displayLayer.error?.localizedDescription ?? "?")")
+                    self.displayLayer.flush()
+                }
+                self.displayLayer.enqueue(retimed)
+                if !self.hasVideoContent {
+                    self.hasVideoContent = true
+                    print("[DAT] first frame enqueued — layer bounds=\(self.displayLayer.bounds) status=\(self.displayLayer.status.rawValue) isReady=\(self.displayLayer.isReadyForMoreMediaData)")
+                }
             }
         }
         listenerTokens.append(frameToken)
@@ -202,11 +280,14 @@ final class GlassesManager: ObservableObject {
         listenerTokens.append(errorToken)
 
         streamSession = session
+        print("[DAT] calling session.start()")
         await session.start()
+        print("[DAT] session.start() returned")
     }
 
     func captureCurrentFrame() -> UIImage? {
-        latestFrame
+        guard let contents = displayLayer.contents else { return nil }
+        return UIImage(cgImage: contents as! CGImage)
     }
 
     // MARK: - Private

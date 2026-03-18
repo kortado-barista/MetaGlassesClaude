@@ -71,10 +71,8 @@ struct ContentView: View {
 
     @ViewBuilder
     private var cameraPreview: some View {
-        if let frame = glassesManager.latestFrame {
-            Image(uiImage: frame)
-                .resizable()
-                .scaledToFit()
+        if glassesManager.hasVideoContent {
+            CameraLayerView(layer: glassesManager.displayLayer)
                 .frame(maxHeight: 200)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .overlay(alignment: .topLeading) {
@@ -294,6 +292,34 @@ struct MessageBubble: View {
             if isUser { Spacer(minLength: 40) }
         }
         .padding(.horizontal)
+    }
+}
+
+// MARK: - CameraLayerView
+
+import AVFoundation
+
+struct CameraLayerView: UIViewRepresentable {
+    let layer: AVSampleBufferDisplayLayer
+
+    class HostView: UIView {
+        var videoLayer: AVSampleBufferDisplayLayer?
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            videoLayer?.frame = bounds
+        }
+    }
+
+    func makeUIView(context: Context) -> HostView {
+        let view = HostView()
+        view.backgroundColor = .black
+        view.layer.addSublayer(layer)
+        view.videoLayer = layer
+        return view
+    }
+
+    func updateUIView(_ uiView: HostView, context: Context) {
+        uiView.setNeedsLayout()
     }
 }
 
