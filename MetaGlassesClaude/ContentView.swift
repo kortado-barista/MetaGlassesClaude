@@ -71,8 +71,10 @@ struct ContentView: View {
 
     @ViewBuilder
     private var cameraPreview: some View {
-        if glassesManager.hasVideoContent {
-            CameraLayerView(layer: glassesManager.displayLayer)
+        if let frame = glassesManager.latestFrame {
+            Image(uiImage: frame)
+                .resizable()
+                .scaledToFit()
                 .frame(maxHeight: 200)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .overlay(alignment: .topLeading) {
@@ -301,6 +303,7 @@ import AVFoundation
 
 struct CameraLayerView: UIViewRepresentable {
     let layer: AVSampleBufferDisplayLayer
+    @Binding var hostView: UIView?
 
     class HostView: UIView {
         var videoLayer: AVSampleBufferDisplayLayer?
@@ -315,6 +318,7 @@ struct CameraLayerView: UIViewRepresentable {
         view.backgroundColor = .black
         view.layer.addSublayer(layer)
         view.videoLayer = layer
+        DispatchQueue.main.async { hostView = view }
         return view
     }
 

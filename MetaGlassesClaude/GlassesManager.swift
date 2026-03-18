@@ -4,6 +4,7 @@
 import Foundation
 import UIKit
 import AVFoundation
+import VideoToolbox
 import Combine
 import MWDATCore
 import MWDATCamera
@@ -13,33 +14,15 @@ final class GlassesManager: ObservableObject {
 
     @Published var connectionState: DATConnectionState = .disconnected
     @Published var isConnected = false
-    @Published var hasVideoContent = false
+    @Published var latestFrame: UIImage?
     @Published var registrationState: RegistrationState = .unavailable
     @Published var errorMessage: String?
-
-    /// AVSampleBufferDisplayLayer handles native HEVC decoding and display.
-    let displayLayer: AVSampleBufferDisplayLayer = {
-        let layer = AVSampleBufferDisplayLayer()
-        layer.videoGravity = .resizeAspect
-        // Tie the layer to the host clock so retimed frames display immediately
-        var timebase: CMTimebase?
-        CMTimebaseCreateWithSourceClock(
-            allocator: kCFAllocatorDefault,
-            sourceClock: CMClockGetHostTimeClock(),
-            timebaseOut: &timebase
-        )
-        if let timebase {
-            CMTimebaseSetTime(timebase, time: CMClockGetTime(CMClockGetHostTimeClock()))
-            CMTimebaseSetRate(timebase, rate: 1.0)
-            layer.controlTimebase = timebase
-        }
-        return layer
-    }()
 
     private var wearables: any WearablesInterface { MWDATCore.Wearables.shared }
     private var streamSession: StreamSession?
     private var listenerTokens: [any AnyListenerToken] = []
     private var isCameraStarting = false
+    private let hevcDecoder = HEVCDecoder()
 
     // MARK: - Setup
 
@@ -138,27 +121,11 @@ final class GlassesManager: ObservableObject {
         }
         listenerTokens.append(stateToken)
 
+        let decoder = hevcDecoder
         let frameToken = session.videoFramePublisher.listen { [weak self] (frame: VideoFrame) in
-            let sampleBuffer = frame.sampleBuffer
-            // Retime to host clock so AVSampleBufferDisplayLayer renders immediately
-            var timing = CMSampleTimingInfo(
-                duration: CMTime(value: 1, timescale: 15),
-                presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
-                decodeTimeStamp: .invalid
-            )
-            var retimed: CMSampleBuffer?
-            guard CMSampleBufferCreateCopyWithNewTiming(
-                allocator: nil,
-                sampleBuffer: sampleBuffer,
-                sampleTimingEntryCount: 1,
-                sampleTimingArray: &timing,
-                sampleBufferOut: &retimed
-            ) == noErr, let retimed else { return }
+            guard let image = decoder.decode(frame.sampleBuffer) else { return }
             Task { @MainActor [weak self] in
-                guard let self else { return }
-                if self.displayLayer.status == .failed { self.displayLayer.flush() }
-                self.displayLayer.enqueue(retimed)
-                if !self.hasVideoContent { self.hasVideoContent = true }
+                self?.latestFrame = image
             }
         }
         listenerTokens.append(frameToken)
@@ -240,33 +207,11 @@ final class GlassesManager: ObservableObject {
         }
         listenerTokens.append(stateToken)
 
+        let decoder2 = hevcDecoder
         let frameToken = session.videoFramePublisher.listen { [weak self] (frame: VideoFrame) in
-            let sampleBuffer = frame.sampleBuffer
-            // Retime to host clock so AVSampleBufferDisplayLayer renders immediately
-            var timing = CMSampleTimingInfo(
-                duration: CMTime(value: 1, timescale: 15),
-                presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
-                decodeTimeStamp: .invalid
-            )
-            var retimed: CMSampleBuffer?
-            guard CMSampleBufferCreateCopyWithNewTiming(
-                allocator: nil,
-                sampleBuffer: sampleBuffer,
-                sampleTimingEntryCount: 1,
-                sampleTimingArray: &timing,
-                sampleBufferOut: &retimed
-            ) == noErr, let retimed else { return }
+            guard let image = decoder2.decode(frame.sampleBuffer) else { return }
             Task { @MainActor [weak self] in
-                guard let self else { return }
-                if self.displayLayer.status == .failed {
-                    print("[DAT] displayLayer failed: \(self.displayLayer.error?.localizedDescription ?? "?")")
-                    self.displayLayer.flush()
-                }
-                self.displayLayer.enqueue(retimed)
-                if !self.hasVideoContent {
-                    self.hasVideoContent = true
-                    print("[DAT] first frame enqueued — layer bounds=\(self.displayLayer.bounds) status=\(self.displayLayer.status.rawValue) isReady=\(self.displayLayer.isReadyForMoreMediaData)")
-                }
+                self?.latestFrame = image
             }
         }
         listenerTokens.append(frameToken)
@@ -286,8 +231,7 @@ final class GlassesManager: ObservableObject {
     }
 
     func captureCurrentFrame() -> UIImage? {
-        guard let contents = displayLayer.contents else { return nil }
-        return UIImage(cgImage: contents as! CGImage)
+        return latestFrame
     }
 
     // MARK: - Private
@@ -325,6 +269,66 @@ final class GlassesManager: ObservableObject {
             isConnected = true
             Task { await startCamera(for: deviceId) }
         }
+    }
+}
+
+// MARK: - HEVC Decoder
+
+/// Holds a decoded CVPixelBuffer from the VTDecompressionSession callback.
+private final class PixelBufferHolder {
+    var buffer: CVPixelBuffer?
+}
+
+/// C-compatible callback required by VTDecompressionSession.
+private func vtOutputCallback(
+    refCon: UnsafeMutableRawPointer?,
+    frameRefCon: UnsafeMutableRawPointer?,
+    status: OSStatus,
+    infoFlags: VTDecodeInfoFlags,
+    imageBuffer: CVImageBuffer?,
+    pts: CMTime,
+    duration: CMTime
+) {
+    guard status == noErr, let imageBuffer, let frameRefCon else { return }
+    Unmanaged<PixelBufferHolder>.fromOpaque(frameRefCon).takeUnretainedValue().buffer = imageBuffer
+}
+
+/// Decodes a single HEVC CMSampleBuffer to UIImage on demand.
+final class HEVCDecoder {
+    private var session: VTDecompressionSession?
+
+    func decode(_ sampleBuffer: CMSampleBuffer) -> UIImage? {
+        if session == nil {
+            guard let fmt = CMSampleBufferGetFormatDescription(sampleBuffer) else { return nil }
+            let attrs = [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA] as CFDictionary
+            var cb = VTDecompressionOutputCallbackRecord(
+                decompressionOutputCallback: vtOutputCallback,
+                decompressionOutputRefCon: nil
+            )
+            VTDecompressionSessionCreate(
+                allocator: kCFAllocatorDefault,
+                formatDescription: fmt,
+                decoderSpecification: nil,
+                imageBufferAttributes: attrs,
+                outputCallback: &cb,
+                decompressionSessionOut: &session
+            )
+        }
+        guard let session else { return nil }
+        let holder = PixelBufferHolder()
+        var flags = VTDecodeInfoFlags()
+        VTDecompressionSessionDecodeFrame(
+            session,
+            sampleBuffer: sampleBuffer,
+            flags: [],
+            frameRefcon: Unmanaged.passUnretained(holder).toOpaque(),
+            infoFlagsOut: &flags
+        )
+        VTDecompressionSessionWaitForAsynchronousFrames(session)
+        guard let pb = holder.buffer else { return nil }
+        let ci = CIImage(cvPixelBuffer: pb)
+        guard let cg = CIContext().createCGImage(ci, from: ci.extent) else { return nil }
+        return UIImage(cgImage: cg)
     }
 }
 
