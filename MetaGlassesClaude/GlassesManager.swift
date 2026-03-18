@@ -23,6 +23,7 @@ final class GlassesManager: ObservableObject {
     private var listenerTokens: [any AnyListenerToken] = []
     private var isCameraStarting = false
     private let hevcDecoder = HEVCDecoder()
+    private var registeredDeviceListeners: Set<String> = []
 
     // MARK: - Setup
 
@@ -122,11 +123,13 @@ final class GlassesManager: ObservableObject {
         listenerTokens.append(stateToken)
 
         let decoder = hevcDecoder
-        let frameToken = session.videoFramePublisher.listen { [weak self] (frame: VideoFrame) in
-            guard let image = decoder.decode(frame.sampleBuffer) else { return }
+        decoder.onDecodedFrame = { [weak self] image in
             Task { @MainActor [weak self] in
                 self?.latestFrame = image
             }
+        }
+        let frameToken = session.videoFramePublisher.listen { (frame: VideoFrame) in
+            decoder.feed(frame.sampleBuffer)
         }
         listenerTokens.append(frameToken)
 
@@ -148,6 +151,8 @@ final class GlassesManager: ObservableObject {
         isCameraStarting = false
         connectionState = .disconnected
         isConnected = false
+        hevcDecoder.invalidateSession()
+        registeredDeviceListeners.removeAll()
     }
 
     // MARK: - Camera
@@ -208,11 +213,13 @@ final class GlassesManager: ObservableObject {
         listenerTokens.append(stateToken)
 
         let decoder2 = hevcDecoder
-        let frameToken = session.videoFramePublisher.listen { [weak self] (frame: VideoFrame) in
-            guard let image = decoder2.decode(frame.sampleBuffer) else { return }
+        decoder2.onDecodedFrame = { [weak self] image in
             Task { @MainActor [weak self] in
                 self?.latestFrame = image
             }
+        }
+        let frameToken = session.videoFramePublisher.listen { (frame: VideoFrame) in
+            decoder2.feed(frame.sampleBuffer)
         }
         listenerTokens.append(frameToken)
 
@@ -246,6 +253,10 @@ final class GlassesManager: ObservableObject {
 
         updateConnectionState(device.linkState, deviceId: firstId)
 
+        let idString = "\(firstId)"
+        guard !registeredDeviceListeners.contains(idString) else { return }
+        registeredDeviceListeners.insert(idString)
+
         let token = device.addLinkStateListener { [weak self] linkState in
             Task { @MainActor [weak self] in
                 self?.updateConnectionState(linkState, deviceId: firstId)
@@ -261,6 +272,7 @@ final class GlassesManager: ObservableObject {
             isConnected = false
             Task { await streamSession?.stop() }
             streamSession = nil
+            hevcDecoder.invalidateSession()
         case .connecting:
             connectionState = .connecting
             isConnected = false
@@ -274,12 +286,8 @@ final class GlassesManager: ObservableObject {
 
 // MARK: - HEVC Decoder
 
-/// Holds a decoded CVPixelBuffer from the VTDecompressionSession callback.
-private final class PixelBufferHolder {
-    var buffer: CVPixelBuffer?
-}
-
 /// C-compatible callback required by VTDecompressionSession.
+/// `refCon` points to the HEVCDecoder instance (unretained).
 private func vtOutputCallback(
     refCon: UnsafeMutableRawPointer?,
     frameRefCon: UnsafeMutableRawPointer?,
@@ -289,23 +297,33 @@ private func vtOutputCallback(
     pts: CMTime,
     duration: CMTime
 ) {
-    guard status == noErr, let imageBuffer, let frameRefCon else { return }
-    Unmanaged<PixelBufferHolder>.fromOpaque(frameRefCon).takeUnretainedValue().buffer = imageBuffer
+    guard status == noErr, let imageBuffer, let refCon else { return }
+    let decoder = Unmanaged<HEVCDecoder>.fromOpaque(refCon).takeUnretainedValue()
+    decoder.handleDecoded(imageBuffer)
 }
 
-/// Decodes a single HEVC CMSampleBuffer to UIImage on demand.
+/// Async (non-blocking) HEVC decoder.
+/// `feed()` enqueues each sample buffer to VideoToolbox without waiting.
+/// Decoded frames are delivered via `onDecodedFrame` on VT's internal thread.
 final class HEVCDecoder {
     private var session: VTDecompressionSession?
+    private let ciContext = CIContext()
+    private var decodeCount = 0
 
-    func decode(_ sampleBuffer: CMSampleBuffer) -> UIImage? {
+    /// Called on VT's callback thread for every successfully decoded frame.
+    /// Throttled to ~15fps display (every other frame).
+    var onDecodedFrame: ((UIImage) -> Void)?
+
+    /// Feed an HEVC sample buffer to VideoToolbox — returns immediately.
+    func feed(_ sampleBuffer: CMSampleBuffer) {
         if session == nil {
-            guard let fmt = CMSampleBufferGetFormatDescription(sampleBuffer) else { return nil }
+            guard let fmt = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
             let attrs = [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA] as CFDictionary
             var cb = VTDecompressionOutputCallbackRecord(
                 decompressionOutputCallback: vtOutputCallback,
-                decompressionOutputRefCon: nil
+                decompressionOutputRefCon: Unmanaged.passUnretained(self).toOpaque()
             )
-            VTDecompressionSessionCreate(
+            let status = VTDecompressionSessionCreate(
                 allocator: kCFAllocatorDefault,
                 formatDescription: fmt,
                 decoderSpecification: nil,
@@ -313,22 +331,41 @@ final class HEVCDecoder {
                 outputCallback: &cb,
                 decompressionSessionOut: &session
             )
+            if status != noErr {
+                print("[HEVCDecoder] VTDecompressionSessionCreate failed: \(status)")
+                return
+            }
         }
-        guard let session else { return nil }
-        let holder = PixelBufferHolder()
+        guard let session else { return }
         var flags = VTDecodeInfoFlags()
         VTDecompressionSessionDecodeFrame(
             session,
             sampleBuffer: sampleBuffer,
             flags: [],
-            frameRefcon: Unmanaged.passUnretained(holder).toOpaque(),
+            frameRefcon: nil,
             infoFlagsOut: &flags
         )
-        VTDecompressionSessionWaitForAsynchronousFrames(session)
-        guard let pb = holder.buffer else { return nil }
-        let ci = CIImage(cvPixelBuffer: pb)
-        guard let cg = CIContext().createCGImage(ci, from: ci.extent) else { return nil }
-        return UIImage(cgImage: cg)
+        // No Wait — returns immediately, callback fires on VT's thread
+    }
+
+    /// Called from `vtOutputCallback` on VT's internal thread.
+    func handleDecoded(_ imageBuffer: CVImageBuffer) {
+        decodeCount += 1
+        // Display every other decoded frame (~15fps at 30fps input, ~7fps at 15fps input)
+        guard decodeCount % 2 == 0 else { return }
+        let ci = CIImage(cvPixelBuffer: imageBuffer)
+        guard let cg = ciContext.createCGImage(ci, from: ci.extent) else { return }
+        let image = UIImage(cgImage: cg)
+        onDecodedFrame?(image)
+    }
+
+    /// Invalidate the VT session so it is recreated on the next frame (call on reconnect/disconnect).
+    func invalidateSession() {
+        if let s = session {
+            VTDecompressionSessionInvalidate(s)
+        }
+        session = nil
+        decodeCount = 0
     }
 }
 
