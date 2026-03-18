@@ -1,0 +1,9 @@
+// Config.swift.example
+// Copy this file to Config.swift and fill in your Anthropic API key.
+// Config.swift is listed in .gitignore and must never be committed.
+
+enum Config {
+    static let anthropicAPIKey = "sk-ant-YOUR_API_KEY_HERE"
+    static let claudeModel = "claude-opus-4-6"
+    static let maxTokens = 1024
+}

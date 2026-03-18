@@ -6,13 +6,32 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		70E423C02F6AD2BC0033C1FF /* MWDATCamera in Frameworks */ = {isa = PBXBuildFile; productRef = 70E423BF2F6AD2BC0033C1FF /* MWDATCamera */; };
+		70E423C22F6AD2BC0033C1FF /* MWDATCore in Frameworks */ = {isa = PBXBuildFile; productRef = 70E423C12F6AD2BC0033C1FF /* MWDATCore */; };
+		70E423C42F6AD2BC0033C1FF /* MWDATMockDevice in Frameworks */ = {isa = PBXBuildFile; productRef = 70E423C32F6AD2BC0033C1FF /* MWDATMockDevice */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		70E423A02F6ACF800033C1FF /* MetaGlassesClaude.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MetaGlassesClaude.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		70E423C82F6AEA900033C1FF /* Exceptions for "MetaGlassesClaude" folder in "MetaGlassesClaude" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 70E4239F2F6ACF800033C1FF /* MetaGlassesClaude */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		70E423A22F6ACF800033C1FF /* MetaGlassesClaude */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				70E423C82F6AEA900033C1FF /* Exceptions for "MetaGlassesClaude" folder in "MetaGlassesClaude" target */,
+			);
 			path = MetaGlassesClaude;
 			sourceTree = "<group>";
 		};
@@ -23,6 +42,9 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				70E423C02F6AD2BC0033C1FF /* MWDATCamera in Frameworks */,
+				70E423C42F6AD2BC0033C1FF /* MWDATMockDevice in Frameworks */,
+				70E423C22F6AD2BC0033C1FF /* MWDATCore in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -65,6 +87,9 @@
 			);
 			name = MetaGlassesClaude;
 			packageProductDependencies = (
+				70E423BF2F6AD2BC0033C1FF /* MWDATCamera */,
+				70E423C12F6AD2BC0033C1FF /* MWDATCore */,
+				70E423C32F6AD2BC0033C1FF /* MWDATMockDevice */,
 			);
 			productName = MetaGlassesClaude;
 			productReference = 70E423A02F6ACF800033C1FF /* MetaGlassesClaude.app */;
@@ -94,6 +119,9 @@
 			);
 			mainGroup = 70E423972F6ACF800033C1FF;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				70E423BE2F6AD2BC0033C1FF /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 70E423A12F6ACF800033C1FF /* Products */;
 			projectDirPath = "";
@@ -251,8 +279,12 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 6ARLQUG8DR;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = MetaGlassesClaude/Info.plist;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "This app uses the microphone to capture your voice and send it to Claude.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "This app uses speech recognition to convert your voice to text and send it to Claude.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -282,8 +314,12 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 6ARLQUG8DR;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = MetaGlassesClaude/Info.plist;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "This app uses the microphone to capture your voice and send it to Claude.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "This app uses speech recognition to convert your voice to text and send it to Claude.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -328,6 +364,35 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		70E423BE2F6AD2BC0033C1FF /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/facebook/meta-wearables-dat-ios.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.5.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		70E423BF2F6AD2BC0033C1FF /* MWDATCamera */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 70E423BE2F6AD2BC0033C1FF /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */;
+			productName = MWDATCamera;
+		};
+		70E423C12F6AD2BC0033C1FF /* MWDATCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 70E423BE2F6AD2BC0033C1FF /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */;
+			productName = MWDATCore;
+		};
+		70E423C32F6AD2BC0033C1FF /* MWDATMockDevice */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 70E423BE2F6AD2BC0033C1FF /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */;
+			productName = MWDATMockDevice;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 70E423982F6ACF800033C1FF /* Project object */;
 }
