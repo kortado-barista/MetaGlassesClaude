@@ -1,0 +1,8 @@
+{
+  "applinks": {
+    "details": [{
+      "appIDs": ["YOUR_TEAM_ID.com.kortado.MetaGlassesClaude"],
+      "components": [{"/*": "*"}]
+    }]
+  }
+}
