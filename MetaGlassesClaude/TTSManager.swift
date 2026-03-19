@@ -22,6 +22,7 @@ final class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate 
     // MARK: - Public API
 
     func speak(_ text: String) {
+        let text = TTSManager.stripMarkdown(text)
         guard !text.isEmpty else { return }
 
         // Stop any current speech before starting new
@@ -42,6 +43,22 @@ final class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate 
 
         isSpeaking = true
         synthesizer.speak(utterance)
+    }
+
+    // MARK: - Markdown stripping
+
+    /// Removes common markdown so it doesn't get read aloud literally.
+    private static func stripMarkdown(_ text: String) -> String {
+        var s = text
+        // Bold/italic: **text**, *text*, __text__, _text_
+        s = s.replacingOccurrences(of: #"\*{1,2}([^*]+)\*{1,2}"#, with: "$1", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"_{1,2}([^_]+)_{1,2}"#, with: "$1", options: .regularExpression)
+        // Headers: ## Title
+        s = s.replacingOccurrences(of: #"^#{1,6}\s+"#, with: "", options: [.regularExpression, .anchored])
+        s = s.replacingOccurrences(of: #"\n#{1,6}\s+"#, with: "\n", options: .regularExpression)
+        // Inline code: `code`
+        s = s.replacingOccurrences(of: #"`([^`]+)`"#, with: "$1", options: .regularExpression)
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - Voice selection
