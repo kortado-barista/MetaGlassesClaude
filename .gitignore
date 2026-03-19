@@ -1,0 +1,27 @@
+# API keys and secrets
+Config.swift
+
+# Xcode user data
+*.xcuserstate
+xcuserdata/
+*.xcuserdatad/
+*.xcworkspace/xcuserdata/
+
+# Build artifacts
+build/
+DerivedData/
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# CocoaPods (if used)
+Pods/
+
+# Swift Package Manager
+.build/
+.swiftpm/

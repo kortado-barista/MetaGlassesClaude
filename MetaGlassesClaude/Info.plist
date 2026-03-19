@@ -11,7 +11,7 @@
             <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
             <key>CFBundleURLSchemes</key>
             <array>
-                <string>fb3852881391514920</string>
+                <string>kortado-glasses</string>
             </array>
         </dict>
     </array>
@@ -40,13 +40,13 @@
     <key>MWDAT</key>
     <dict>
         <key>AppLinkURLScheme</key>
-        <string>fb3852881391514920://</string>
+        <string>kortado-glasses://</string>
         <key>MetaAppID</key>
-        <string>3852881391514920</string>
+        <string>1590040195614796</string>
         <key>ClientToken</key>
-        <string>AR|3852881391514920|67fae792f6a02451c1b4407eda0863b3</string>
+        <string>AR|1590040195614796|ee5bfe90c69acfbaaeaf5292dd0dbca8</string>
         <key>TeamID</key>
-        <string>YGCD4UXZCF</string>
+        <string>$(DEVELOPMENT_TEAM)</string>
     </dict>
 </dict>
 </plist>
