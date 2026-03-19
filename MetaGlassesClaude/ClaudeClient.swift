@@ -61,8 +61,16 @@ final class ClaudeClient: ObservableObject {
         var contentBlocks: [[String: Any]] = []
 
         if let image {
-            guard let base64 = jpegBase64(from: image) else {
-                throw ClaudeError.imageEncodingFailed
+            // Encode on a GCD global queue (not Swift's cooperative pool) so the
+            // cooperative pool stays free for latestFrame updates from the decoder.
+            let base64: String = try await withCheckedThrowingContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    if let result = Self.jpegBase64(from: image) {
+                        continuation.resume(returning: result)
+                    } else {
+                        continuation.resume(throwing: ClaudeError.imageEncodingFailed)
+                    }
+                }
             }
             contentBlocks.append([
                 "type": "image",
@@ -162,14 +170,16 @@ final class ClaudeClient: ObservableObject {
 
     // MARK: - Helpers
 
-    /// Encode UIImage to JPEG base64. Compresses to ≤ 4 MB to stay within API limits.
-    private func jpegBase64(from image: UIImage) -> String? {
-        var quality: CGFloat = 0.8
+    /// Encode UIImage to JPEG base64.
+    /// Resizes to max 640px wide first — keeps the payload small (~80-150KB)
+    /// so the WiFi upload finishes quickly and doesn't interfere with Bluetooth.
+    private nonisolated static func jpegBase64(from image: UIImage) -> String? {
+        let scaled = image.scaledToMaxWidth(640)
+        var quality: CGFloat = 0.7
         while quality >= 0.1 {
-            if let data = image.jpegData(compressionQuality: quality) {
-                if data.count <= 4_000_000 {
-                    return data.base64EncodedString()
-                }
+            if let data = scaled.jpegData(compressionQuality: quality),
+               data.count <= 1_000_000 {
+                return data.base64EncodedString()
             }
             quality -= 0.2
         }
@@ -196,5 +206,20 @@ enum ClaudeError: LocalizedError {
         case .unexpectedResponseShape:
             return "Claude returned an unexpected response format."
         }
+    }
+}
+
+// MARK: - UIImage helpers
+
+private extension UIImage {
+    /// Returns a copy scaled so the longer dimension is ≤ maxWidth.
+    /// If the image is already smaller, returns self unchanged.
+    func scaledToMaxWidth(_ maxWidth: CGFloat) -> UIImage {
+        let scale = min(maxWidth / size.width, maxWidth / size.height, 1)
+        guard scale < 1 else { return self }
+        let newSize = CGSize(width: (size.width * scale).rounded(),
+                             height: (size.height * scale).rounded())
+        let renderer = UIGraphicsImageRenderer(size: newSize)
+        return renderer.image { _ in draw(in: CGRect(origin: .zero, size: newSize)) }
     }
 }

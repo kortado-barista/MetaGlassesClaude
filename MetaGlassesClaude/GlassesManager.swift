@@ -213,12 +213,22 @@ final class GlassesManager: ObservableObject {
         listenerTokens.append(stateToken)
 
         let decoder2 = hevcDecoder
+        var decodedFrameCount = 0
         decoder2.onDecodedFrame = { [weak self] image in
+            decodedFrameCount += 1
+            if decodedFrameCount == 1 || decodedFrameCount % 30 == 0 {
+                print("[DAT] onDecodedFrame #\(decodedFrameCount) — dispatching to MainActor")
+            }
             Task { @MainActor [weak self] in
                 self?.latestFrame = image
             }
         }
+        var videoFrameCount = 0
         let frameToken = session.videoFramePublisher.listen { (frame: VideoFrame) in
+            videoFrameCount += 1
+            if videoFrameCount == 1 || videoFrameCount % 90 == 0 {
+                print("[DAT] videoFramePublisher frame #\(videoFrameCount)")
+            }
             decoder2.feed(frame.sampleBuffer)
         }
         listenerTokens.append(frameToken)
@@ -307,17 +317,39 @@ private func vtOutputCallback(
 /// Decoded frames are delivered via `onDecodedFrame` on VT's internal thread.
 final class HEVCDecoder {
     private var session: VTDecompressionSession?
-    private let ciContext = CIContext()
     private var decodeCount = 0
+    private var lastDecodeTime = Date.distantPast
 
     /// Called on VT's callback thread for every successfully decoded frame.
     /// Throttled to ~15fps display (every other frame).
     var onDecodedFrame: ((UIImage) -> Void)?
 
+    private var feedCount = 0
+
     /// Feed an HEVC sample buffer to VideoToolbox — returns immediately.
     func feed(_ sampleBuffer: CMSampleBuffer) {
+        feedCount += 1
+        if feedCount == 1 || feedCount % 90 == 0 {
+            print("[HEVCDecoder] feed #\(feedCount), session=\(session != nil)")
+        }
+
+        // Auto-recovery: transport disruptions (BT packet loss, P-frame drops) can
+        // silently stop the VT callback. If we haven't decoded anything in 1.5s,
+        // reset the session so the next IDR keyframe restarts decoding.
+        if let s = session, Date().timeIntervalSince(lastDecodeTime) > 1.5 {
+            print("[HEVCDecoder] no decode in 1.5s — resetting session for recovery")
+            VTDecompressionSessionInvalidate(s)
+            session = nil
+            decodeCount = 0
+        }
+
         if session == nil {
-            guard let fmt = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
+            guard let fmt = CMSampleBufferGetFormatDescription(sampleBuffer) else {
+                print("[HEVCDecoder] feed #\(feedCount): no format description, skipping")
+                return
+            }
+            let mediaType = CMFormatDescriptionGetMediaSubType(fmt)
+            print("[HEVCDecoder] creating VTDecompressionSession, mediaSubType=\(mediaType)")
             let attrs = [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA] as CFDictionary
             var cb = VTDecompressionOutputCallbackRecord(
                 decompressionOutputCallback: vtOutputCallback,
@@ -335,28 +367,64 @@ final class HEVCDecoder {
                 print("[HEVCDecoder] VTDecompressionSessionCreate failed: \(status)")
                 return
             }
+            print("[HEVCDecoder] VTDecompressionSessionCreate succeeded")
         }
         guard let session else { return }
         var flags = VTDecodeInfoFlags()
-        VTDecompressionSessionDecodeFrame(
+        let decodeStatus = VTDecompressionSessionDecodeFrame(
             session,
             sampleBuffer: sampleBuffer,
             flags: [],
             frameRefcon: nil,
             infoFlagsOut: &flags
         )
+        if feedCount == 1 || feedCount % 90 == 0 {
+            print("[HEVCDecoder] DecodeFrame #\(feedCount) status=\(decodeStatus) flags=\(flags.rawValue)")
+        }
         // No Wait — returns immediately, callback fires on VT's thread
     }
 
     /// Called from `vtOutputCallback` on VT's internal thread.
     func handleDecoded(_ imageBuffer: CVImageBuffer) {
+        lastDecodeTime = Date()
         decodeCount += 1
+        if decodeCount == 1 || decodeCount % 30 == 0 {
+            print("[HEVCDecoder] handleDecoded #\(decodeCount)")
+        }
         // Display every other decoded frame (~15fps at 30fps input, ~7fps at 15fps input)
         guard decodeCount % 2 == 0 else { return }
-        let ci = CIImage(cvPixelBuffer: imageBuffer)
-        guard let cg = ciContext.createCGImage(ci, from: ci.extent) else { return }
-        let image = UIImage(cgImage: cg)
-        onDecodedFrame?(image)
+
+        // Copy pixel data immediately while the buffer is locked so VT can
+        // reuse the output buffer right away (CIContext holds GPU-side refs
+        // asynchronously and exhausts VT's buffer pool after ~150 frames).
+        CVPixelBufferLockBaseAddress(imageBuffer, .readOnly)
+        let width = CVPixelBufferGetWidth(imageBuffer)
+        let height = CVPixelBufferGetHeight(imageBuffer)
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(imageBuffer)
+        guard let base = CVPixelBufferGetBaseAddress(imageBuffer) else {
+            CVPixelBufferUnlockBaseAddress(imageBuffer, .readOnly)
+            return
+        }
+        let data = Data(bytes: base, count: bytesPerRow * height)
+        CVPixelBufferUnlockBaseAddress(imageBuffer, .readOnly)
+        // VT can now reuse the buffer immediately ↑
+
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue
+                       | CGImageAlphaInfo.premultipliedFirst.rawValue
+        guard let provider = CGDataProvider(data: data as CFData),
+              let cg = CGImage(
+                width: width, height: height,
+                bitsPerComponent: 8, bitsPerPixel: 32,
+                bytesPerRow: bytesPerRow,
+                space: colorSpace,
+                bitmapInfo: CGBitmapInfo(rawValue: bitmapInfo),
+                provider: provider,
+                decode: nil, shouldInterpolate: false,
+                intent: .defaultIntent)
+        else { return }
+
+        onDecodedFrame?(UIImage(cgImage: cg))
     }
 
     /// Invalidate the VT session so it is recreated on the next frame (call on reconnect/disconnect).
@@ -366,6 +434,7 @@ final class HEVCDecoder {
         }
         session = nil
         decodeCount = 0
+        lastDecodeTime = Date.distantPast
     }
 }
 
