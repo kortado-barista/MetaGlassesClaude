@@ -3,6 +3,8 @@
 
 import SwiftUI
 import Speech
+import AVFoundation
+import Combine
 
 struct ContentView: View {
 
@@ -10,173 +12,253 @@ struct ContentView: View {
     @StateObject private var voiceInput = VoiceInputManager()
     @StateObject private var claude = ClaudeClient()
     @StateObject private var tts = TTSManager()
+    @StateObject private var wakeWord = WakeWordManager()
 
     @State private var includeCamera = true
     @State private var errorMessage: String?
-    @State private var hasPermissions = false
+    @State private var showConversation = false
+    @State private var proactiveAlertsEnabled = false
+
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        NavigationStack {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
             VStack(spacing: 0) {
-                connectionBanner
-                cameraPreview
-                conversationList
-                Spacer(minLength: 0)
+                topBar
+                cameraSection
+                statusStrip
                 bottomControls
             }
-            .navigationTitle("Glasses + Claude")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { clearButton }
-            .alert("Error", isPresented: .constant(errorMessage != nil), actions: {
-                Button("OK") { errorMessage = nil }
-            }, message: {
-                Text(errorMessage ?? "")
-            })
-            .task { await setup() }
+        }
+        .preferredColorScheme(.dark)
+        .sheet(isPresented: $showConversation) { conversationSheet }
+        .alert("Error", isPresented: .constant(errorMessage != nil), actions: {
+            Button("OK") { errorMessage = nil }
+        }, message: {
+            Text(errorMessage ?? "")
+        })
+        .task { await setup() }
+        .task(id: proactiveAlertsEnabled) { await runProactiveAlerts() }
+        .onReceive(wakeWord.detectedPublisher) { onWakeWord() }
+        .onChange(of: scenePhase) { phase in
+            if phase == .background { maintainBackgroundAudio() }
         }
     }
 
-    // MARK: - Sub-views
+    // MARK: - Top bar
 
-    private var connectionBanner: some View {
-        HStack(spacing: 8) {
+    private var topBar: some View {
+        HStack(spacing: 10) {
             Circle()
                 .fill(glassesManager.isConnected ? Color.green : Color.red)
-                .frame(width: 10, height: 10)
+                .frame(width: 8, height: 8)
             Text(glassesManager.connectionState.displayText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
             Spacer()
+
+            if wakeWord.isListening {
+                Label("Listening", systemImage: "waveform")
+                    .font(.caption2)
+                    .foregroundStyle(.blue)
+                    .padding(.trailing, 4)
+            }
+
             if !glassesManager.isConnected {
-                Button("Connect") {
-                    glassesManager.startConnecting()
-                }
-                .font(.caption)
-                .buttonStyle(.bordered)
-                .controlSize(.mini)
+                Button("Connect") { glassesManager.startConnecting() }
+                    .font(.caption)
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
             } else {
-                Button("Disconnect") {
-                    glassesManager.disconnect()
-                }
-                .font(.caption)
-                .buttonStyle(.bordered)
-                .controlSize(.mini)
-                .tint(.red)
+                Button("Disconnect") { glassesManager.disconnect() }
+                    .font(.caption)
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                    .tint(.red)
             }
         }
         .padding(.horizontal)
         .padding(.vertical, 8)
-        .background(Color(.systemGroupedBackground))
+        .background(.ultraThinMaterial)
     }
 
+    // MARK: - Camera section
+
     @ViewBuilder
-    private var cameraPreview: some View {
+    private var cameraSection: some View {
         if let frame = glassesManager.latestFrame {
             Image(uiImage: frame)
                 .resizable()
                 .scaledToFit()
-                .frame(maxHeight: 200)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .overlay(alignment: .topLeading) {
-                    Label("Live View", systemImage: "camera.fill")
+                    Label("Live", systemImage: "circle.fill")
                         .font(.caption2)
+                        .foregroundStyle(.red)
                         .padding(6)
                         .background(.ultraThinMaterial, in: Capsule())
                         .padding(8)
                 }
-                .padding(.horizontal)
-                .padding(.top, 8)
+        } else {
+            VStack(spacing: 12) {
+                Image(systemName: "camera.slash")
+                    .font(.system(size: 44))
+                    .foregroundStyle(.secondary)
+                Text(glassesManager.isConnected ? "Starting camera…" : "Connect glasses to see live view")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
-    private var conversationList: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    ForEach(claude.messages) { msg in
-                        MessageBubble(message: msg)
-                            .id(msg.id)
-                    }
+    // MARK: - Status strip
 
-                    // Live transcript while recording
-                    if !voiceInput.liveTranscript.isEmpty {
-                        HStack {
-                            Image(systemName: "mic.fill")
-                                .foregroundStyle(.red)
-                            Text(voiceInput.liveTranscript)
-                                .italic()
-                                .foregroundStyle(.secondary)
-                        }
-                        .font(.subheadline)
-                        .padding(.horizontal)
-                    }
-
-                    // Loading indicator
-                    if claude.isLoading {
-                        HStack(spacing: 8) {
-                            ProgressView().controlSize(.small)
-                            Text("Claude is thinking…")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.horizontal)
-                    }
-                }
-                .padding(.vertical, 12)
+    @ViewBuilder
+    private var statusStrip: some View {
+        if !voiceInput.liveTranscript.isEmpty {
+            HStack(spacing: 8) {
+                Image(systemName: "mic.fill").foregroundStyle(.red)
+                Text(voiceInput.liveTranscript)
+                    .italic()
+                    .lineLimit(2)
             }
-            .onChange(of: claude.messages.count) { _ in
-                if let last = claude.messages.last {
-                    withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
-                }
+            .font(.subheadline)
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.ultraThinMaterial)
+        } else if claude.isLoading {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Claude is thinking…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.ultraThinMaterial)
+        } else if tts.isSpeaking {
+            HStack(spacing: 8) {
+                Image(systemName: "speaker.wave.2.fill").foregroundStyle(.blue)
+                Text("Speaking…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Stop") { tts.stop() }
+                    .font(.caption)
+                    .buttonStyle(.borderless)
+                    .tint(.red)
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+            .background(.ultraThinMaterial)
         }
     }
+
+    // MARK: - Bottom controls
 
     private var bottomControls: some View {
-        VStack(spacing: 12) {
-            Divider()
-
-            Toggle(isOn: $includeCamera) {
-                Label(
-                    includeCamera ? "Camera: On" : "Camera: Off",
-                    systemImage: includeCamera ? "camera.fill" : "camera.slash.fill"
-                )
-                .font(.subheadline)
-            }
-            .toggleStyle(.button)
-            .tint(includeCamera ? .blue : .gray)
-            .disabled(!glassesManager.isConnected)
-
-            PushToTalkButton(
-                voiceInput: voiceInput,
-                onRelease: handleUtteranceComplete
-            )
-
-            if tts.isSpeaking {
-                HStack(spacing: 6) {
-                    Image(systemName: "speaker.wave.2.fill")
-                        .foregroundStyle(.blue)
-                    Text("Speaking…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Button("Stop") { tts.stop() }
-                        .font(.caption)
-                        .buttonStyle(.borderless)
-                        .tint(.red)
+        VStack(spacing: 14) {
+            // Primary row: Read Aloud · PTT · Conversation
+            HStack(spacing: 28) {
+                CircleButton(icon: "text.viewfinder", label: "Read", color: .orange, size: 58) {
+                    handleReadAloud()
                 }
+                .disabled(glassesManager.latestFrame == nil || claude.isLoading)
+
+                PushToTalkButton(voiceInput: voiceInput, onRelease: handleUtteranceComplete)
+
+                CircleButton(
+                    icon: "bubble.left.and.bubble.right",
+                    label: "Chat",
+                    color: .purple,
+                    size: 58,
+                    badge: claude.messages.isEmpty ? nil : "\(claude.messages.count)"
+                ) {
+                    showConversation = true
+                }
+            }
+
+            // Secondary row: toggles
+            HStack(spacing: 12) {
+                Toggle(isOn: $includeCamera) {
+                    Label(
+                        includeCamera ? "Camera" : "Camera",
+                        systemImage: includeCamera ? "camera.fill" : "camera.slash.fill"
+                    )
+                    .font(.caption)
+                }
+                .toggleStyle(.button)
+                .tint(includeCamera ? .blue : .gray)
+                .disabled(!glassesManager.isConnected)
+                .controlSize(.small)
+
+                Divider().frame(height: 20)
+
+                Toggle(isOn: $proactiveAlertsEnabled) {
+                    Label("Alerts", systemImage: "eye")
+                        .font(.caption)
+                }
+                .toggleStyle(.button)
+                .tint(proactiveAlertsEnabled ? .green : .gray)
+                .disabled(!glassesManager.isConnected)
+                .controlSize(.small)
+
+                Divider().frame(height: 20)
+
+                Toggle(isOn: Binding(
+                    get: { wakeWord.isListening },
+                    set: { $0 ? wakeWord.start() : wakeWord.stop() }
+                )) {
+                    Label("Wake", systemImage: "waveform.badge.mic")
+                        .font(.caption)
+                }
+                .toggleStyle(.button)
+                .tint(wakeWord.isListening ? .blue : .gray)
+                .controlSize(.small)
             }
         }
         .padding(.horizontal)
-        .padding(.bottom, 20)
+        .padding(.vertical, 16)
         .background(.ultraThinMaterial)
     }
 
-    private var clearButton: some ToolbarContent {
-        ToolbarItem(placement: .navigationBarTrailing) {
-            Button("Clear") {
-                claude.clearHistory()
+    // MARK: - Conversation sheet
+
+    private var conversationSheet: some View {
+        NavigationStack {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        ForEach(claude.messages) { msg in
+                            MessageBubble(message: msg).id(msg.id)
+                        }
+                    }
+                    .padding(.vertical, 12)
+                }
+                .onChange(of: claude.messages.count) { _ in
+                    if let last = claude.messages.last {
+                        withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                    }
+                }
             }
-            .disabled(claude.messages.isEmpty)
+            .navigationTitle("Conversation")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Done") { showConversation = false }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Clear") { claude.clearHistory() }
+                        .disabled(claude.messages.isEmpty)
+                }
+            }
         }
     }
 
@@ -184,7 +266,6 @@ struct ContentView: View {
 
     private func setup() async {
         let granted = await voiceInput.requestAuthorization()
-        hasPermissions = granted
         if !granted {
             errorMessage = "Microphone and speech recognition access are required. Enable them in Settings."
         }
@@ -200,6 +281,95 @@ struct ContentView: View {
                 tts.speak(response)
             } catch {
                 errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func handleReadAloud() {
+        guard let frame = glassesManager.captureCurrentFrame() else { return }
+        Task {
+            do {
+                let response = try await claude.sendMessage(
+                    text: ClaudeClient.readAloudPrompt,
+                    image: frame
+                )
+                tts.speak(response)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func onWakeWord() {
+        if case .recording = voiceInput.state { return }
+        // Route the completed utterance through handleUtteranceComplete
+        voiceInput.onUtteranceComplete = { text in
+            self.voiceInput.onUtteranceComplete = nil
+            self.handleUtteranceComplete(text: text)
+        }
+        voiceInput.startRecording()
+    }
+
+    private func runProactiveAlerts() async {
+        guard proactiveAlertsEnabled else { return }
+        while !Task.isCancelled && proactiveAlertsEnabled {
+            try? await Task.sleep(for: .seconds(60))
+            guard proactiveAlertsEnabled, !Task.isCancelled else { break }
+            guard let frame = glassesManager.captureCurrentFrame() else { continue }
+            if let alert = try? await claude.sendSilentQuery(
+                prompt: "Is there anything important or unusual in this scene I should know about?",
+                image: frame
+            ) {
+                tts.speak(alert)
+            }
+        }
+    }
+
+    private func maintainBackgroundAudio() {
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(
+            .playAndRecord,
+            mode: .default,
+            options: [.allowBluetooth, .allowBluetoothA2DP, .mixWithOthers]
+        )
+        try? session.setActive(true)
+    }
+}
+
+// MARK: - CircleButton
+
+struct CircleButton: View {
+    let icon: String
+    let label: String
+    let color: Color
+    var size: CGFloat = 56
+    var badge: String? = nil
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack(alignment: .topTrailing) {
+                VStack(spacing: 3) {
+                    Image(systemName: icon)
+                        .font(.system(size: size * 0.36, weight: .medium))
+                    Text(label)
+                        .font(.caption2)
+                }
+                .frame(width: size, height: size)
+                .background(color.opacity(0.85))
+                .foregroundStyle(.white)
+                .clipShape(Circle())
+                .shadow(color: color.opacity(0.4), radius: 4)
+
+                if let badge {
+                    Text(badge)
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Color.red, in: Capsule())
+                        .offset(x: 4, y: -4)
+                }
             }
         }
     }
@@ -220,42 +390,42 @@ struct PushToTalkButton: View {
     }
 
     var body: some View {
-        ZStack {
-            Circle()
-                .fill(isRecording ? Color.red : Color.blue)
-                .frame(width: 80, height: 80)
-                .scaleEffect(isRecording ? 1.1 : 1.0)
-                .animation(.spring(response: 0.2), value: isRecording)
-                .shadow(color: (isRecording ? Color.red : Color.blue).opacity(0.4),
-                        radius: isRecording ? 12 : 4)
+        VStack(spacing: 6) {
+            ZStack {
+                Circle()
+                    .fill(isRecording ? Color.red : Color.blue)
+                    .frame(width: 80, height: 80)
+                    .scaleEffect(isRecording ? 1.12 : 1.0)
+                    .animation(.spring(response: 0.2), value: isRecording)
+                    .shadow(
+                        color: (isRecording ? Color.red : Color.blue).opacity(0.5),
+                        radius: isRecording ? 14 : 5
+                    )
 
-            Image(systemName: isRecording ? "mic.fill" : "mic")
-                .font(.system(size: 30, weight: .medium))
-                .foregroundStyle(.white)
-        }
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .updating($isPressed) { _, state, _ in state = true }
-                .onChanged { _ in
-                    if !isRecording {
-                        voiceInput.startRecording()
+                Image(systemName: isRecording ? "mic.fill" : "mic")
+                    .font(.system(size: 30, weight: .medium))
+                    .foregroundStyle(.white)
+            }
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .updating($isPressed) { _, state, _ in state = true }
+                    .onChanged { _ in
+                        if !isRecording { voiceInput.startRecording() }
                     }
-                }
-                .onEnded { _ in
-                    voiceInput.stopRecording()
-                    // Wait briefly for final recognition result, then fire callback
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        let text = voiceInput.finalTranscript
-                        if !text.isEmpty {
-                            onRelease(text)
+                    .onEnded { _ in
+                        voiceInput.stopRecording()
+                        // Brief wait for the recognizer to deliver its final result
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            let text = voiceInput.finalTranscript
+                            if !text.isEmpty { onRelease(text) }
                         }
                     }
-                }
-        )
+            )
 
-        Text(isRecording ? "Release to send" : "Hold to speak")
-            .font(.caption)
-            .foregroundStyle(.secondary)
+            Text(isRecording ? "Release to send" : "Hold to speak")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 }
 
@@ -294,36 +464,6 @@ struct MessageBubble: View {
             if isUser { Spacer(minLength: 40) }
         }
         .padding(.horizontal)
-    }
-}
-
-// MARK: - CameraLayerView
-
-import AVFoundation
-
-struct CameraLayerView: UIViewRepresentable {
-    let layer: AVSampleBufferDisplayLayer
-    @Binding var hostView: UIView?
-
-    class HostView: UIView {
-        var videoLayer: AVSampleBufferDisplayLayer?
-        override func layoutSubviews() {
-            super.layoutSubviews()
-            videoLayer?.frame = bounds
-        }
-    }
-
-    func makeUIView(context: Context) -> HostView {
-        let view = HostView()
-        view.backgroundColor = .black
-        view.layer.addSublayer(layer)
-        view.videoLayer = layer
-        DispatchQueue.main.async { hostView = view }
-        return view
-    }
-
-    func updateUIView(_ uiView: HostView, context: Context) {
-        uiView.setNeedsLayout()
     }
 }
 

@@ -30,8 +30,8 @@ final class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate 
         }
 
         let utterance = AVSpeechUtterance(string: text)
-        // Use a natural English voice when available
-        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        // Prefer premium/enhanced neural voice; falls back to standard en-US
+        utterance.voice = TTSManager.bestVoice()
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate
         utterance.pitchMultiplier = 1.0
         utterance.volume = 1.0
@@ -42,6 +42,29 @@ final class TTSManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate 
 
         isSpeaking = true
         synthesizer.speak(utterance)
+    }
+
+    // MARK: - Voice selection
+
+    /// Returns the highest-quality en-US voice available on this device.
+    /// iOS 16+ ships Premium neural voices; iOS 15 has Enhanced; older has Standard.
+    /// Selecting by highest rawValue automatically picks Premium > Enhanced > Default.
+    private static func bestVoice() -> AVSpeechSynthesisVoice? {
+        let all = AVSpeechSynthesisVoice.speechVoices()
+            .filter { $0.language == "en-US" }
+
+        // Score: higher = better. Prefer premium/enhanced quality first,
+        // then modern Eloquence/neural voices over old compact/novelty voices.
+        func score(_ v: AVSpeechSynthesisVoice) -> Int {
+            let qualityScore = v.quality.rawValue * 100
+            let isEloquence = v.identifier.contains("eloquence") ? 10 : 0
+            let isCompact   = v.identifier.contains("compact")   ? -20 : 0
+            let isNovelty   = v.identifier.contains("speech.synthesis.voice") ? -30 : 0
+            return qualityScore + isEloquence + isCompact + isNovelty
+        }
+
+        return all.max(by: { score($0) < score($1) })
+            ?? AVSpeechSynthesisVoice(language: "en-US")
     }
 
     func stop() {

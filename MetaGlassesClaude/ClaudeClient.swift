@@ -111,6 +111,53 @@ final class ClaudeClient: ObservableObject {
         return responseText
     }
 
+    /// Send a one-shot query that does NOT appear in conversation history.
+    /// Returns nil when Claude indicates nothing noteworthy (used for proactive alerts).
+    func sendSilentQuery(prompt: String, image: UIImage?) async throws -> String? {
+        var contentBlocks: [[String: Any]] = []
+
+        if let image {
+            let base64: String = try await withCheckedThrowingContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    if let result = Self.jpegBase64(from: image) {
+                        continuation.resume(returning: result)
+                    } else {
+                        continuation.resume(throwing: ClaudeError.imageEncodingFailed)
+                    }
+                }
+            }
+            contentBlocks.append([
+                "type": "image",
+                "source": ["type": "base64", "media_type": "image/jpeg", "data": base64]
+            ])
+        }
+        contentBlocks.append(["type": "text", "text": prompt])
+
+        let payload: [String: Any] = [
+            "model": model,
+            "max_tokens": 150,
+            "system": """
+                You are a passive awareness assistant in a pair of smart glasses. \
+                Respond with one concise sentence only if there is something genuinely \
+                important or useful to flag (hazard, urgent text, notable event). \
+                If there is nothing noteworthy, respond with exactly: nothing
+                """,
+            "messages": [["role": "user", "content": contentBlocks]]
+        ]
+
+        let response = try await callAPIWithPayload(payload)
+        let trimmed = response.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.lowercased().hasPrefix("nothing") ? nil : trimmed
+    }
+
+    /// Prompt for the "Read It Aloud" mode — reads visible text with context.
+    static let readAloudPrompt = """
+        Look at this image carefully. If there is text visible (a sign, menu, label, \
+        document, screen, etc.), read it aloud naturally and add brief helpful context \
+        (for example: 'This is a restaurant menu. The specials today are…'). \
+        If there is no readable text, describe what you see in one sentence.
+        """
+
     /// Clear conversation history (starts a fresh session).
     func clearHistory() {
         messages.removeAll()
@@ -120,24 +167,27 @@ final class ClaudeClient: ObservableObject {
     // MARK: - API call
 
     private func callAPI() async throws -> String {
+        let payload: [String: Any] = [
+            "model": model,
+            "max_tokens": maxTokens,
+            "system": """
+                You are a friendly assistant built into a pair of smart glasses. \
+                Responses are read aloud via text-to-speech, so be warm but very brief — \
+                1-2 sentences maximum. No lists, no markdown, no filler phrases. \
+                Get straight to the point.
+                """,
+            "messages": apiHistory
+        ]
+        return try await callAPIWithPayload(payload)
+    }
+
+    private func callAPIWithPayload(_ payload: [String: Any]) async throws -> String {
         let url = URL(string: "https://api.anthropic.com/v1/messages")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-
-        let payload: [String: Any] = [
-            "model": model,
-            "max_tokens": maxTokens,
-            "system": """
-                You are a helpful assistant embedded in a pair of smart glasses. \
-                The user can talk to you hands-free. Keep responses concise and \
-                conversational — they will be read aloud via text-to-speech.
-                """,
-            "messages": apiHistory
-        ]
-
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
         let (data, response) = try await URLSession.shared.data(for: request)
